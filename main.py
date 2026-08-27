@@ -7,7 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 try:
     from dotenv import load_dotenv
@@ -15,10 +16,21 @@ try:
 except ImportError:
     pass
 
+from integrations import FirestoreStateTracker, publish_pipeline_results
+from process_video import process_video_pipeline
+
 app = FastAPI(
     title="SnapToSpec - Autonomous Video-to-Spec Agent Pipeline",
     version="1.0.0",
     description="Converts screencast videos into structured technical specifications, extracted frame screenshots, and Playwright tests."
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -133,6 +145,38 @@ def process_direct(req: DirectProcessRequest, background_tasks: BackgroundTasks)
         "task_id": task_id,
         "status": "QUEUED",
         "message": "Video processing initiated asynchronously."
+    }
+
+@app.post("/upload")
+async def upload_and_process(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    output_bucket: Optional[str] = Form(None)
+):
+    """
+    Accepts a direct multipart video upload from dashboard and triggers autonomous pipeline.
+    """
+    task_id = str(uuid.uuid4())[:8]
+    temp_dir = tempfile.mkdtemp(prefix=f"snaptospec_{task_id}_")
+    local_video_path = os.path.join(temp_dir, file.filename or f"video_{task_id}.mp4")
+
+    with open(local_video_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    background_tasks.add_task(
+        execute_pipeline_task,
+        video_local_path=local_video_path,
+        task_id=task_id,
+        output_bucket=output_bucket,
+        cleanup_temp_dir=temp_dir
+    )
+
+    return {
+        "task_id": task_id,
+        "status": "QUEUED",
+        "filename": file.filename,
+        "message": "Video uploaded and pipeline execution triggered asynchronously."
     }
 
 @app.post("/pubsub")
