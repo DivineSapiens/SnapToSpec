@@ -7,9 +7,11 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ==========================================
 # 1. Pydantic Schemas for Structured Output

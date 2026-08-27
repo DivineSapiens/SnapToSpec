@@ -9,12 +9,11 @@ from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
-from dotenv import load_dotenv
-
-from process_video import process_video_pipeline, SpecOutput
-from integrations import publish_pipeline_results, FirestoreStateTracker
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 app = FastAPI(
     title="SnapToSpec - Autonomous Video-to-Spec Agent Pipeline",
