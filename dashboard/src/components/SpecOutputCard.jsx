@@ -13,6 +13,7 @@ import {
   Maximize2,
   FileDown,
   CheckCircle2,
+  Eye,
   Bug
 } from 'lucide-react';
 import { GithubIcon } from './Icons';
@@ -58,16 +59,54 @@ export default function SpecOutputCard({
     }
   };
 
-  // Build combined frame list (either from frameUrls or timestamps)
-  const displayFrames = frameUrls.length > 0 
-    ? frameUrls 
-    : timestamps_of_interest.map((ts, idx) => ({
-        id: idx + 1,
-        timestamp: `${ts.timestamp_seconds}s`,
-        label: ts.label,
-        description: ts.description,
-        url: `https://picsum.photos/seed/${taskId || 'frame'}-${idx}/800/450`
-      }));
+  // Robust frame extraction & mapping: handles strings, object maps, or timestamps
+  const displayFrames = (timestamps_of_interest && timestamps_of_interest.length > 0)
+    ? timestamps_of_interest.map((ts, idx) => {
+        let frameUrl = null;
+        if (Array.isArray(frameUrls) && frameUrls[idx]) {
+          frameUrl = typeof frameUrls[idx] === 'string' ? frameUrls[idx] : frameUrls[idx].url;
+        } else if (frameUrls && typeof frameUrls === 'object' && !Array.isArray(frameUrls)) {
+          const values = Object.values(frameUrls);
+          if (values[idx]) frameUrl = typeof values[idx] === 'string' ? values[idx] : values[idx]?.url;
+        }
+
+        const safeLabel = (ts.label || `Frame_${idx + 1}`).replace(/[^a-zA-Z0-9_-]/g, '');
+        const filename = `frame_${idx + 1 < 10 ? '0' + (idx + 1) : idx + 1}_${Math.floor(ts.timestamp_seconds)}s_${safeLabel}.jpg`;
+
+        if (!frameUrl) {
+          const gcsBucket = import.meta.env.VITE_GCS_OUTPUT_BUCKET || 'gen-lang-client-0274499098-snaptospec-frames';
+          frameUrl = `https://storage.googleapis.com/${gcsBucket}/frames/${taskId}/${filename}`;
+        }
+
+        return {
+          id: idx + 1,
+          timestamp: `${ts.timestamp_seconds}s`,
+          label: ts.label || `Keyframe ${idx + 1}`,
+          description: ts.description || 'Snapshot of UI state during user action.',
+          url: frameUrl,
+          fallbackUrl: `http://localhost:8080/frames/${taskId}/${filename}`
+        };
+      })
+    : (frameUrls && (Array.isArray(frameUrls) ? frameUrls.length > 0 : Object.keys(frameUrls).length > 0))
+    ? (Array.isArray(frameUrls) ? frameUrls : Object.values(frameUrls)).map((item, idx) => {
+        const urlStr = typeof item === 'string' ? item : (item?.url || '');
+        return {
+          id: idx + 1,
+          timestamp: `Frame ${idx + 1}`,
+          label: (typeof item === 'object' && item?.label) ? item.label : `Keyframe ${idx + 1}`,
+          description: (typeof item === 'object' && item?.description) ? item.description : 'Snapshot of UI state during user action.',
+          url: urlStr,
+          fallbackUrl: `http://localhost:8080/frames/${taskId}/frame_${idx + 1}.jpg`
+        };
+      })
+    : [];
+
+  const isDefectStep = (step) => {
+    if (!step.actual_result) return false;
+    const actual = step.actual_result.toLowerCase();
+    const failKeywords = ['fail', 'error', 'nothing happens', 'unresponsive', 'crash', 'not work', 'broken', 'no download', 'freeze', 'stuck', 'disabled', '404', '500', 'non-functional'];
+    return failKeywords.some(w => actual.includes(w));
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-6 duration-500">
@@ -91,7 +130,7 @@ export default function SpecOutputCard({
             </span>
             {taskId && (
               <span className="text-xs font-mono text-slate-400 bg-slate-900 px-2.5 py-1 rounded-full border border-slate-800">
-                Task ID: {taskId}
+                Task ID: #{taskId}
               </span>
             )}
           </div>
@@ -174,17 +213,22 @@ export default function SpecOutputCard({
               className="group cursor-pointer rounded-xl bg-slate-900/80 border border-slate-800 hover:border-brand-500/60 overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-brand-500/10 flex flex-col"
             >
               {/* Image Container */}
-              <div className="relative aspect-video bg-black overflow-hidden">
+              <div className="relative aspect-video bg-slate-950 overflow-hidden flex items-center justify-center">
                 <img
                   src={frame.url}
                   alt={frame.label || `Frame ${index + 1}`}
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   loading="lazy"
+                  onError={(e) => {
+                    if (frame.fallbackUrl && e.target.src !== frame.fallbackUrl) {
+                      e.target.src = frame.fallbackUrl;
+                    }
+                  }}
                 />
                 
                 {/* Timestamp Pill Badge */}
                 <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/80 backdrop-blur-md text-[11px] font-mono font-bold text-brand-300 border border-white/10 flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
+                  <Clock className="w-3.5 h-3.5" />
                   {frame.timestamp}
                 </div>
 
@@ -225,41 +269,73 @@ export default function SpecOutputCard({
         </div>
 
         <div className="space-y-4">
-          {reproduction_steps.map((step, idx) => (
-            <div
-              key={idx}
-              className="rounded-xl p-4 sm:p-5 bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 transition-all flex flex-col sm:flex-row items-start gap-4"
-            >
-              {/* Step Number Badge */}
-              <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-gradient-to-tr from-brand-600 to-indigo-600 flex items-center justify-center font-mono font-bold text-sm text-white shadow-md">
-                {step.step_number || idx + 1}
-              </div>
+          {reproduction_steps.map((step, idx) => {
+            const isFailing = isDefectStep(step);
 
-              {/* Step Content */}
-              <div className="flex-1 space-y-2">
-                <div className="text-sm font-semibold text-white">
-                  <span className="text-brand-400 font-mono text-xs uppercase mr-1.5 font-bold">Action:</span>
-                  {step.action}
+            return (
+              <div
+                key={idx}
+                className={`rounded-xl p-4 sm:p-5 border transition-all flex flex-col sm:flex-row items-start gap-4 ${
+                  isFailing
+                    ? 'bg-amber-950/20 border-amber-500/50 shadow-lg shadow-amber-500/5 ring-1 ring-amber-500/20'
+                    : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700'
+                }`}
+              >
+                {/* Step Number Badge */}
+                <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center font-mono font-bold text-sm text-white shadow-md ${
+                  isFailing
+                    ? 'bg-gradient-to-tr from-amber-600 to-rose-600'
+                    : 'bg-gradient-to-tr from-brand-600 to-indigo-600'
+                }`}>
+                  {step.step_number || idx + 1}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-xs">
-                  {step.expected_result && (
-                    <div className="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-800/40 text-emerald-300">
-                      <strong className="text-emerald-400 block mb-0.5">✓ Expected Result:</strong>
-                      {step.expected_result}
+                {/* Step Content */}
+                <div className="flex-1 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-white">
+                      <span className="text-brand-400 font-mono text-xs uppercase mr-1.5 font-bold">Action:</span>
+                      {step.action}
                     </div>
-                  )}
+                    {isFailing && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 uppercase tracking-wider flex items-center gap-1">
+                        <ShieldAlert className="w-3 h-3 text-amber-400" />
+                        Defect Point Identified
+                      </span>
+                    )}
+                  </div>
 
-                  {step.actual_result && (
-                    <div className="p-2.5 rounded-lg bg-rose-950/20 border border-rose-800/40 text-rose-300">
-                      <strong className="text-rose-400 block mb-0.5">✗ Actual Result:</strong>
-                      {step.actual_result}
-                    </div>
-                  )}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 text-xs">
+                    {step.expected_result && (
+                      <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/60 text-slate-200 shadow-sm flex flex-col justify-start">
+                        <span className="flex items-center gap-1.5 text-[11px] font-mono font-bold text-emerald-400 uppercase tracking-wider mb-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          Expected Result
+                        </span>
+                        <span className="text-slate-300 leading-relaxed">{step.expected_result}</span>
+                      </div>
+                    )}
+
+                    {step.actual_result && (
+                      <div className={`p-3 rounded-xl shadow-sm flex flex-col justify-start border ${
+                        isFailing
+                          ? 'bg-amber-950/30 border-amber-600/50 text-amber-100'
+                          : 'bg-slate-800/40 border-slate-700/60 text-slate-200'
+                      }`}>
+                        <span className={`flex items-center gap-1.5 text-[11px] font-mono font-bold uppercase tracking-wider mb-1 ${
+                          isFailing ? 'text-amber-400 font-extrabold' : 'text-indigo-300'
+                        }`}>
+                          {isFailing ? <ShieldAlert className="w-3.5 h-3.5 text-amber-400" /> : <Eye className="w-3.5 h-3.5 text-indigo-400" />}
+                          {isFailing ? 'Observed Defect / Failure' : 'Observed Result'}
+                        </span>
+                        <span className="leading-relaxed">{step.actual_result}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

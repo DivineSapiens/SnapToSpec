@@ -17,7 +17,8 @@ export default function Uploader({ onStartProcessing, isProcessing }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState(null);
   const [videoMeta, setVideoMeta] = useState({ duration: 0, size: '' });
-  const [outputBucket, setOutputBucket] = useState('snaptospec-frames');
+  const defaultBucket = import.meta.env.VITE_GCS_OUTPUT_BUCKET || 'gen-lang-client-0274499098-snaptospec-frames';
+  const [outputBucket, setOutputBucket] = useState(defaultBucket);
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef(null);
 
@@ -74,7 +75,7 @@ export default function Uploader({ onStartProcessing, isProcessing }) {
     if (!selectedFile && !isProcessing) return;
     onStartProcessing({
       file: selectedFile,
-      outputBucket: outputBucket.trim() || 'snaptospec-frames'
+      outputBucket: outputBucket.trim() || defaultBucket
     });
   };
 

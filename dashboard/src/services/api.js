@@ -58,3 +58,13 @@ export async function checkBackendHealth() {
     return null;
   }
 }
+
+export async function fetchTaskStatus(taskId) {
+  try {
+    const res = await fetch(`${BACKEND_URL}/task/${taskId}`, { method: 'GET', mode: 'cors' });
+    if (res.ok) return await res.json();
+    return null;
+  } catch {
+    return null;
+  }
+}

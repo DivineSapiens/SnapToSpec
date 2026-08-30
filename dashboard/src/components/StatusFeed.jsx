@@ -114,9 +114,10 @@ export default function StatusFeed({
       {/* Step by Step Progress Indicators */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 relative">
         {STEPS.map((step, idx) => {
-          const isDone = currentIndex > idx || (currentIndex === 3 && idx === 3);
-          const isCurrent = currentIndex === idx && !isFailed;
-          const isPending = currentIndex < idx && !isFailed;
+          const isCompletedOverall = currentStatus === 'COMPLETED';
+          const isDone = isCompletedOverall || currentIndex > idx;
+          const isCurrent = !isCompletedOverall && currentIndex === idx && !isFailed;
+          const isPending = !isCompletedOverall && currentIndex < idx && !isFailed;
           const Icon = step.icon;
 
           return (
@@ -124,7 +125,7 @@ export default function StatusFeed({
               key={step.key}
               className={`relative rounded-xl p-4 transition-all duration-300 border ${
                 isDone
-                  ? 'bg-emerald-950/20 border-emerald-500/30'
+                  ? 'bg-emerald-950/20 border-emerald-500/40 shadow-sm'
                   : isCurrent
                   ? 'bg-brand-950/30 border-brand-500/60 ring-2 ring-brand-500/20 shadow-lg shadow-brand-500/10 scale-[1.02]'
                   : 'bg-slate-900/40 border-slate-800/80 opacity-60'

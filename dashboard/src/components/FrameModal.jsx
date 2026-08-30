@@ -61,6 +61,11 @@ export default function FrameModal({
             src={frame.url}
             alt={frame.label}
             className="max-h-[65vh] w-auto max-w-full object-contain rounded-lg shadow-lg"
+            onError={(e) => {
+              if (frame.fallbackUrl && e.target.src !== frame.fallbackUrl) {
+                e.target.src = frame.fallbackUrl;
+              }
+            }}
           />
 
           {/* Prev Button */}

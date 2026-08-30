@@ -7,7 +7,7 @@ import SpecOutputCard from './components/SpecOutputCard';
 import FrameModal from './components/FrameModal';
 import ConfigModal from './components/ConfigModal';
 import { SAMPLE_SPEC } from './data/mockSpec';
-import { submitVideoToPipeline, checkBackendHealth } from './services/api';
+import { submitVideoToPipeline, checkBackendHealth, fetchTaskStatus } from './services/api';
 import { subscribeToTask } from './services/firebase';
 
 export default function App() {
@@ -41,33 +41,54 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Listen to Firestore updates if activeTaskId changes
+  // Listen to task updates via Backend polling + Firestore sync
   useEffect(() => {
     if (!activeTaskId) return;
 
-    const unsubscribe = subscribeToTask(
-      activeTaskId,
-      (data) => {
-        if (!data) return;
-        if (data.status) setPipelineStatus(data.status);
-        if (data.updated_at) setTaskUpdatedAt(data.updated_at);
-        if (data.github_issue_url) setGithubIssueUrl(data.github_issue_url);
-        if (data.spec) setSpecResult(data.spec);
-        if (data.frame_urls) setFrameUrls(data.frame_urls);
-        if (data.error) setErrorMessage(data.error);
+    let isSubscribed = true;
 
-        if (data.status === 'COMPLETED') {
-          setIsProcessing(false);
-          triggerConfetti();
-        }
-      },
-      (err) => {
-        console.warn('Firestore subscription fallback mode:', err);
+    const handleTaskData = (data) => {
+      if (!data || !isSubscribed) return;
+      if (data.status) {
+        setPipelineStatus((prev) => {
+          if (prev !== data.status) {
+            addLog(`Pipeline state updated: ${data.status}`);
+          }
+          return data.status;
+        });
       }
-    );
+      if (data.updated_at) setTaskUpdatedAt(data.updated_at);
+      if (data.github_issue_url) setGithubIssueUrl(data.github_issue_url);
+      if (data.spec) setSpecResult(data.spec);
+      if (data.frame_urls) setFrameUrls(data.frame_urls);
+      if (data.error) setErrorMessage(data.error);
+
+      if (data.status === 'COMPLETED') {
+        setIsProcessing(false);
+        triggerConfetti();
+      } else if (data.status === 'FAILED') {
+        setIsProcessing(false);
+      }
+    };
+
+    // 1. Direct Backend Poller (works seamlessly out of the box)
+    const pollInterval = setInterval(async () => {
+      const statusData = await fetchTaskStatus(activeTaskId);
+      if (statusData) {
+        handleTaskData(statusData);
+        if (statusData.status === 'COMPLETED' || statusData.status === 'FAILED') {
+          clearInterval(pollInterval);
+        }
+      }
+    }, 1500);
+
+    // 2. Firebase live listener (if configured)
+    const unsubscribeFirebase = subscribeToTask(activeTaskId, handleTaskData, () => {});
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      isSubscribed = false;
+      clearInterval(pollInterval);
+      if (unsubscribeFirebase) unsubscribeFirebase();
     };
   }, [activeTaskId]);
 

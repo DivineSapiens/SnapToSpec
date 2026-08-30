@@ -4,11 +4,13 @@ import base64
 import uuid
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 try:
     from dotenv import load_dotenv
@@ -33,6 +35,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+os.makedirs("./frames", exist_ok=True)
+app.mount("/frames", StaticFiles(directory="./frames"), name="frames")
+
+
+TASK_STORE = {}
+
+def update_memory_and_firestore(task_id: str, status: str, metadata: Optional[Dict[str, Any]] = None):
+    entry = TASK_STORE.get(task_id, {"task_id": task_id})
+    entry["status"] = status
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if metadata:
+        entry.update(metadata)
+    TASK_STORE[task_id] = entry
+    
+    tracker = FirestoreStateTracker()
+    tracker.update_task_state(task_id, status, metadata)
+
 
 # =======================================================
 # Request Schemas
@@ -56,11 +75,10 @@ def execute_pipeline_task(
     output_bucket: Optional[str] = None,
     cleanup_temp_dir: Optional[str] = None
 ):
-    tracker = FirestoreStateTracker()
     frames_dir = f"./frames/{task_id}"
 
     try:
-        tracker.update_task_state(task_id, "PROCESSING", {"video_path": video_local_path})
+        update_memory_and_firestore(task_id, "PROCESSING", {"video_path": video_local_path})
         print(f"[*] Starting SnapToSpec execution for Task `{task_id}`...")
 
         # Step 1: Multimodal analysis + frame extraction
@@ -68,27 +86,31 @@ def execute_pipeline_task(
         spec = pipeline_res["spec"]
         frame_paths = pipeline_res["frame_paths"]
         
-        tracker.update_task_state(task_id, "ANALYZED", {"frame_count": len(frame_paths)})
+        update_memory_and_firestore(task_id, "ANALYZED", {"frame_count": len(frame_paths), "spec": spec})
 
         # Step 2: GCS asset upload + GitHub issue publishing + Firestore completion
-        publish_pipeline_results(
+        pub_res = publish_pipeline_results(
             task_id=task_id,
             spec=spec,
             local_frames=frame_paths,
-            gcs_bucket=output_bucket
+            gcs_bucket=output_bucket or os.getenv("GCS_OUTPUT_BUCKET")
         )
+        
+        update_memory_and_firestore(task_id, "COMPLETED", {
+            "spec": spec,
+            "github_issue_url": pub_res.get("github_result", {}).get("issue_url"),
+            "frame_urls": list(pub_res.get("frame_urls", {}).values())
+        })
         print(f"[+] Task `{task_id}` completed successfully!")
 
     except Exception as e:
         print(f"[!] Pipeline execution failed for `{task_id}`: {e}")
-        tracker.update_task_state(task_id, "FAILED", {"error": str(e)})
+        update_memory_and_firestore(task_id, "FAILED", {"error": str(e)})
 
     finally:
-        # Cleanup temporary files
+        # Cleanup temporary upload folder (keep frames_dir for immediate dashboard & local serving)
         if cleanup_temp_dir and os.path.exists(cleanup_temp_dir):
             shutil.rmtree(cleanup_temp_dir, ignore_errors=True)
-        if os.path.exists(frames_dir):
-            shutil.rmtree(frames_dir, ignore_errors=True)
 
 
 # =======================================================
@@ -99,12 +121,35 @@ def root():
     return {
         "service": "SnapToSpec Agent API",
         "status": "online",
-        "endpoints": ["/health", "/process", "/pubsub"]
+        "endpoints": ["/health", "/process", "/upload", "/task/{task_id}", "/tasks", "/pubsub"]
     }
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "service": "snaptospec-pipeline"}
+
+@app.get("/task/{task_id}")
+def get_task_status(task_id: str):
+    # Check in-memory store first
+    if task_id in TASK_STORE:
+        return TASK_STORE[task_id]
+    
+    # Check Firestore
+    try:
+        tracker = FirestoreStateTracker()
+        doc = tracker.db.collection(tracker.collection_name).document(task_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            TASK_STORE[task_id] = data
+            return data
+    except Exception as e:
+        print(f"[!] Firestore lookup error: {e}")
+        
+    raise HTTPException(status_code=404, detail="Task not found")
+
+@app.get("/tasks")
+def list_tasks():
+    return list(TASK_STORE.values())
 
 @app.post("/process")
 def process_direct(req: DirectProcessRequest, background_tasks: BackgroundTasks):
@@ -137,7 +182,7 @@ def process_direct(req: DirectProcessRequest, background_tasks: BackgroundTasks)
         execute_pipeline_task,
         video_local_path=local_path,
         task_id=task_id,
-        output_bucket=req.output_bucket,
+        output_bucket=req.output_bucket or os.getenv("GCS_OUTPUT_BUCKET"),
         cleanup_temp_dir=temp_dir
     )
 
@@ -168,7 +213,7 @@ async def upload_and_process(
         execute_pipeline_task,
         video_local_path=local_video_path,
         task_id=task_id,
-        output_bucket=output_bucket,
+        output_bucket=output_bucket or os.getenv("GCS_OUTPUT_BUCKET"),
         cleanup_temp_dir=temp_dir
     )
 

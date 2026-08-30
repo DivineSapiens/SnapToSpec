@@ -15,7 +15,7 @@ except ImportError:
 # =======================================================
 class GCSUploader:
     def __init__(self, bucket_name: Optional[str] = None):
-        self.bucket_name = bucket_name or os.getenv("GCS_OUTPUT_BUCKET", "snaptospec-frames")
+        self.bucket_name = bucket_name or os.getenv("GCS_OUTPUT_BUCKET", "gen-lang-client-0274499098-snaptospec-frames")
         self._client = None
         self._bucket = None
 
@@ -40,14 +40,12 @@ class GCSUploader:
         if not path_obj.exists():
             raise FileNotFoundError(f"Local frame not found: {local_path}")
 
-        blob_name = f"{remote_prefix}/{datetime.now(timezone.utc).strftime('%Y%m%d')}/{path_obj.name}"
+        blob_name = f"{remote_prefix}/{path_obj.name}"
         blob = self.bucket.blob(blob_name)
 
         content_type, _ = mimetypes.guess_type(local_path)
         blob.upload_from_filename(local_path, content_type=content_type or "image/jpeg")
 
-        # Option A: Public URL if bucket is public, or standard storage URI
-        # Using standard Google Cloud Storage public media link format:
         public_url = f"https://storage.googleapis.com/{self.bucket_name}/{blob_name}"
         return public_url
 
@@ -57,8 +55,13 @@ class GCSUploader:
         """
         url_map = {}
         for path in local_paths:
-            url = self.upload_frame(path, remote_prefix=f"frames/{execution_id}")
-            url_map[path] = url
+            try:
+                url = self.upload_frame(path, remote_prefix=f"frames/{execution_id}")
+                url_map[path] = url
+                print(f"  [+] Uploaded frame to GCS: {url}")
+            except Exception as e:
+                print(f"  [!] Failed to upload frame {path} to GCS: {e}")
+                url_map[path] = f"http://localhost:8080/frames/{execution_id}/{Path(path).name}"
         return url_map
 
 
@@ -236,13 +239,14 @@ def publish_pipeline_results(
 
     # 1. Upload frames to GCS
     frame_url_map = {}
+    actual_bucket = gcs_bucket or os.getenv("GCS_OUTPUT_BUCKET", "gen-lang-client-0274499098-snaptospec-frames")
     try:
-        uploader = GCSUploader(bucket_name=gcs_bucket)
+        uploader = GCSUploader(bucket_name=actual_bucket)
         frame_url_map = uploader.upload_all_frames(local_frames, execution_id=task_id)
     except Exception as e:
         print(f"[!] GCS frame upload fallback: {e}")
         for idx, path in enumerate(local_frames):
-            frame_url_map[path] = f"https://storage.googleapis.com/{gcs_bucket or 'snaptospec'}/frames/{task_id}/frame_{idx}.jpg"
+            frame_url_map[path] = f"https://storage.googleapis.com/{actual_bucket}/frames/{task_id}/{Path(path).name}"
 
     # 2. Publish to GitHub
     publisher = GitHubSpecPublisher()
@@ -252,6 +256,7 @@ def publish_pipeline_results(
     final_payload = {
         "status": "COMPLETED",
         "spec_title": spec.get("title"),
+        "spec": spec,
         "github_issue_url": gh_result.get("issue_url"),
         "total_frames": len(local_frames),
         "frame_urls": list(frame_url_map.values()),

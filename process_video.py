@@ -98,16 +98,32 @@ def analyze_video_with_gemini(video_path: str, api_key: Optional[str] = None) ->
     5. Output the result strictly conforming to the requested schema.
     """
 
-    print("[*] Performing multimodal analysis with Gemini 3.5...")
-    response = client.models.generate_content(
-        model="gemini-2.5-pro", # Standard Gemini multimodal flagship
-        contents=[video_file, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=SpecOutput,
-            temperature=0.2,
-        ),
-    )
+    # Model selection: prefer gemini-3.5-flash (stable free tier), fallback to gemini-3.6-flash
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    fallback_model = "gemini-3.6-flash"
+    print(f"[*] Performing multimodal analysis with {model_name}...")
+
+    for attempt, current_model in enumerate([model_name, fallback_model], start=1):
+        try:
+            response = client.models.generate_content(
+                model=current_model,
+                contents=[video_file, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SpecOutput,
+                    temperature=0.2,
+                ),
+            )
+            if attempt > 1:
+                print(f"[+] Succeeded with fallback model: {current_model}")
+            break  # success, exit retry loop
+        except Exception as e:
+            err_str = str(e)
+            if ("503" in err_str or "UNAVAILABLE" in err_str) and attempt == 1:
+                print(f"[!] {current_model} overloaded (503), retrying with {fallback_model}...")
+                time.sleep(2)
+                continue
+            raise  # re-raise for other errors or if fallback also fails
 
     raw_text = response.text
     spec_data = SpecOutput.model_validate_json(raw_text)
@@ -130,7 +146,12 @@ def extract_frames_at_timestamps(
     output_path.mkdir(parents=True, exist_ok=True)
 
     extracted_files = []
-    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    # Try PATH first, then known winget install location as fallback
+    ffmpeg_bin = (
+        shutil.which("ffmpeg")
+        or os.getenv("FFMPEG_PATH")
+        or r"C:\Users\kvsre\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+    )
 
     for idx, item in enumerate(timestamps, start=1):
         ts_sec = item.timestamp_seconds
@@ -139,31 +160,77 @@ def extract_frames_at_timestamps(
         filename = f"frame_{idx:02d}_{int(ts_sec)}s_{safe_label}.jpg"
         file_dest = output_path / filename
 
-        # ffmpeg fast seek (-ss before -i) and single frame extraction (-vframes 1)
-        cmd = [
+        # 1. Primary extraction: Fast seek to timestamp
+        cmd_primary = [
             ffmpeg_bin,
             "-y",
             "-ss", str(ts_sec),
             "-i", str(video_path),
             "-vframes", "1",
             "-q:v", "2",
+            "-update", "1",
             str(file_dest)
         ]
 
-        try:
-            subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True
-            )
+        # 2. Fallback extraction: Accurate seek (useful if ts_sec is near end of stream)
+        cmd_accurate = [
+            ffmpeg_bin,
+            "-y",
+            "-i", str(video_path),
+            "-ss", str(ts_sec),
+            "-vframes", "1",
+            "-q:v", "2",
+            "-update", "1",
+            str(file_dest)
+        ]
+
+        # 3. Final frame extraction: Clamp to end of video if Gemini asked for timestamp past video duration
+        cmd_last_frame = [
+            ffmpeg_bin,
+            "-y",
+            "-sseof", "-0.5",
+            "-i", str(video_path),
+            "-vframes", "1",
+            "-q:v", "2",
+            "-update", "1",
+            str(file_dest)
+        ]
+
+        success = False
+        for cmd in (cmd_primary, cmd_accurate, cmd_last_frame):
+            try:
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True
+                )
+                if file_dest.exists() and file_dest.stat().st_size > 500:
+                    success = True
+                    break
+            except Exception:
+                continue
+
+        if success:
             extracted_files.append(str(file_dest.resolve()))
             print(f"  [+] Extracted frame at {ts_sec:.1f}s -> {filename}")
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"  [!] Warning: FFmpeg extraction for timestamp {ts_sec}s failed: {e}")
-            # Create a placeholder frame indicator if ffmpeg is missing locally
-            with open(file_dest, "wb") as f:
-                f.write(b"")
+        else:
+            print(f"  [!] Fallback canvas generation for timestamp {ts_sec}s -> {filename}")
+            # Generate a valid dark styled 1280x720 canvas frame instead of 0-byte corrupt file
+            cmd_canvas = [
+                ffmpeg_bin,
+                "-y",
+                "-f", "lavfi",
+                "-i", "color=c=0x090d1a:s=1280x720:d=1",
+                "-vframes", "1",
+                "-update", "1",
+                str(file_dest)
+            ]
+            try:
+                subprocess.run(cmd_canvas, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            except Exception:
+                with open(file_dest, "wb") as f:
+                    f.write(b"")
             extracted_files.append(str(file_dest.resolve()))
 
     return extracted_files
